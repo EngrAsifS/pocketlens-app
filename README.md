@@ -134,13 +134,12 @@ Web build (root `.env`, baked in at build time — public, no secrets):
 The scheduler runs three jobs: `sync.py` pulls new data, `reconcile.py` compares against
 Plaid's records and fixes anything that drifted, and `digests.py` sends spending digests.
 With Docker Compose these run from the cron container. On a hosted deploy there is no
-separate scheduler process: the database calls the API on a schedule instead (see
-**Scheduled syncs** below).
+scheduler: banks sync when you open the app (see **When banks sync** below).
 
 ## Deploy online with Render
 
 The repo ships a `render.yaml` Blueprint declaring two services: the API (web) and the
-static web site. Scheduled syncs come from Supabase, not a Render cron (see below).
+static web site. There is no Render cron; see **When banks sync** below.
 
 1. Fork this repo to your own Git host.
 2. In Render, **New → Blueprint**, and point it at your fork. Render reads `render.yaml`.
@@ -155,23 +154,28 @@ static web site. Scheduled syncs come from Supabase, not a Render cron (see belo
    **Authentication → URL Configuration → Redirect URLs** so the password-reset link works, and
    configure an SMTP sender so signup-confirmation and reset emails send.
 
-### Scheduled syncs (Supabase pg_cron)
+### When banks sync
 
-The migration `20260919000000_server_side_scheduler.sql` enables `pg_cron` + `pg_net` and
-schedules four jobs that call the API: an hourly incremental sync (`POST /internal/sync`),
-a daily reconcile + digests run (`POST /internal/daily`), and two `/health` pings that wake
-the free-tier API before each sync and keep it warm during the day. The jobs read the API
-URL and the shared secret from Supabase Vault, so run this once in the SQL editor:
+On a hosted deploy there is no scheduled background sync. The web app syncs any bank that
+hasn't synced in the last 15 minutes when you open it, and again when its tab comes back
+into view; the Sync button forces one. Plaid webhooks (`PLAID_WEBHOOK_URL`) also trigger a
+sync when Plaid reports new data.
+
+The migration `20260919000000_server_side_scheduler.sql` adds `pg_cron` + `pg_net` jobs
+that call the API, and `20261107000000_manual_sync_only.sql` removes the data jobs again
+(hourly sync, daily reconcile + digests). What remains is a `/health` ping every 10 minutes
+during the day that keeps the free-tier API warm so opening the app is quick. It reads the
+API URL from Supabase Vault, so run this once in the SQL editor:
 
 ```sql
 select vault.create_secret('https://your-api.onrender.com', 'pocketlens_api_url');
 select vault.create_secret('<the TRIGGER_SECRET value from Render>', 'pocketlens_trigger_secret');
 ```
 
-Check `cron.job` for the schedule and `cron.job_run_details` for run history. Until both
-secrets exist the jobs log a warning and do nothing. The web app also triggers a sync on
-sign-in whenever a linked bank hasn't synced in the last hour, so a stalled schedule never
-leaves the app stale for longer than a login.
+Check `cron.job` for what is scheduled. `POST /internal/sync` and `POST /internal/daily`
+stay on the API, guarded by `TRIGGER_SECRET`, so a schedule can be re-added with one
+`cron.schedule(...)` call. The GitHub Action `.github/workflows/keep-awake.yml` pings
+Supabase once a day so the free-tier project isn't paused for inactivity.
 
 The web app is a plain static build (`web/dist/`), so any static host works too (nginx,
 Caddy, Netlify, Cloudflare Pages, S3). Serve it with a SPA fallback to `index.html`. A
