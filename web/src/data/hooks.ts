@@ -1,7 +1,7 @@
 // React Query hooks over our Supabase data modules. Separate key namespace ('sb') from
 // Keep's original int-id queryKeys.
 
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 // Not React Query's useMutation directly: in demo mode this wrapper turns every write
 // into the sign-up prompt (demo/demoMutation.ts). Identical outside the demo.
@@ -641,15 +641,15 @@ export function useTriggerSync() {
   })
 }
 
-// ── Auto-sync on sign-in ──────────────────────────────────────────────────────
-// The scheduled sync runs server-side (Supabase pg_cron → the API). If it stalls
-// for any reason, opening the app is the fallback: once per sign-in, if any linked
-// bank hasn't synced within AUTO_SYNC_STALE_MS, kick the same incremental sync the
-// Sync button runs. Silent on failure — the scheduled path and the button remain.
+// ── Sync when the app is opened ──────────────────────────────────────────────
+// The only automatic sync: there is no scheduled background sync. Each time the
+// app is opened, or its tab comes back into view, any linked bank that hasn't
+// synced within AUTO_SYNC_STALE_MS gets the same incremental sync the Sync button
+// runs. Silent on failure: the Sync button remains.
 
-export const AUTO_SYNC_STALE_MS = 60 * 60 * 1000
+export const AUTO_SYNC_STALE_MS = 15 * 60 * 1000
 
-/** True when some linked bank is idle and hasn't synced in the last hour (or ever). */
+/** True when some linked bank is idle and hasn't synced within AUTO_SYNC_STALE_MS (or ever). */
 export function isSyncStale(items: PlaidItem[], now: number = Date.now()): boolean {
   return items.some(
     (i) =>
@@ -658,36 +658,62 @@ export function isSyncStale(items: PlaidItem[], now: number = Date.now()): boole
   )
 }
 
-export function useAutoSyncOnLogin(userId: string | null) {
+export function useAutoSyncOnOpen(userId: string | null) {
   const qc = useQueryClient()
   const { data: items } = usePlaidItems()
   const decidedFor = useRef<string | null>(null)
+  const lastKick = useRef(0)
   const wasSyncing = useRef(false)
   const timers = useRef<ReturnType<typeof setTimeout>[]>([])
   useEffect(() => () => timers.current.forEach(clearTimeout), [])
 
+  // Kick a sync when a bank is stale, at most once per AUTO_SYNC_STALE_MS from this
+  // tab, so a sync that keeps failing (last_synced_at stays old) can't retrigger on
+  // every tab switch.
+  const kickIfStale = useCallback(
+    (list: PlaidItem[]) => {
+      const now = Date.now()
+      if (!isSyncStale(list, now) || now - lastKick.current < AUTO_SYNC_STALE_MS) return
+      lastKick.current = now
+      triggerSync()
+        .then(() => {
+          timers.current = SYNC_REFRESH_DELAYS_MS.map((ms) =>
+            setTimeout(() => invalidateAfterSync(qc), ms),
+          )
+        })
+        .catch((e: unknown) => console.warn('auto-sync on open failed', e))
+    },
+    [qc],
+  )
+
+  // Opening the app: decide once per signed-in user, the first time the bank list is known.
   useEffect(() => {
     if (!userId || !items) return
-    // Decide once per signed-in user, the first time the bank list is known.
     if (decidedFor.current !== userId) {
       decidedFor.current = userId
-      if (isSyncStale(items)) {
-        triggerSync()
-          .then(() => {
-            timers.current = SYNC_REFRESH_DELAYS_MS.map((ms) =>
-              setTimeout(() => invalidateAfterSync(qc), ms),
-            )
-          })
-          .catch((e: unknown) => console.warn('auto-sync on sign-in failed', e))
-      }
+      kickIfStale(items)
     }
     // usePlaidItems polls while any bank is mid-sync; when the last one settles,
     // pull the fresh rows in. Covers slow syncs the fixed delays above miss, and
-    // syncs started by the scheduler or a webhook while the app was open.
+    // syncs started by a webhook or the Sync button while the app was open.
     const syncing = items.some((i) => i.is_syncing)
     if (wasSyncing.current && !syncing) invalidateAfterSync(qc)
     wasSyncing.current = syncing
-  }, [userId, items, qc])
+  }, [userId, items, qc, kickIfStale])
+
+  // Coming back to the tab: re-read the banks (window-focus refetch is off app-wide)
+  // and decide again.
+  useEffect(() => {
+    if (!userId) return
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      qc.fetchQuery({ queryKey: sbKeys.plaidItems, queryFn: fetchPlaidItems, staleTime: 0 })
+        .then(kickIfStale)
+        .catch((e: unknown) => console.warn('auto-sync check failed', e))
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [userId, qc, kickIfStale])
 }
 
 /** Full sync: reset every bank's cursor and re-pull the full 730-day window.

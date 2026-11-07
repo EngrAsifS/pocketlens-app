@@ -4,7 +4,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import AppLayout from '@/components/AppLayout'
 import { Toaster as Sonner } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { useAutoSyncOnLogin } from '@/data/hooks'
+import { useAutoSyncOnOpen } from '@/data/hooks'
 import { AuthProvider, useAuth } from '@/lib/auth'
 import DemoApp from '@/demo/DemoApp'
 import { setDemoMode } from '@/demo/demoMode'
@@ -13,11 +13,12 @@ import queryClient from './queryClient'
 import NotFoundPage from './pages/NotFoundPage'
 import { AppRouteTable } from './routes'
 
-/** Sign-in fallback for the scheduled sync: see useAutoSyncOnLogin. Rendered only
- *  inside the signed-in tree, so it never fires against the demo. */
-function AutoSyncOnLogin() {
+/** Syncs stale banks when the app is opened or its tab comes back into view: see
+ *  useAutoSyncOnOpen. Rendered only inside the signed-in tree, so it never fires
+ *  against the demo. */
+function AutoSyncOnOpen() {
   const { user } = useAuth()
-  useAutoSyncOnLogin(user?.id ?? null)
+  useAutoSyncOnOpen(user?.id ?? null)
   return null
 }
 
@@ -48,7 +49,7 @@ function AppRoutes() {
 
   return (
     <BrowserRouter>
-      <AutoSyncOnLogin />
+      <AutoSyncOnOpen />
       <Routes>
         <Route element={<AppLayout />}>{AppRouteTable}</Route>
         {/* The demo's auth screens live at these paths. Signing in swaps this router in

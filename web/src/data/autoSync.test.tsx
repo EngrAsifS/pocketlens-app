@@ -1,4 +1,4 @@
-// Sign-in fallback for the scheduled sync (useAutoSyncOnLogin / isSyncStale).
+// Sync on app open and tab refocus (useAutoSyncOnOpen / isSyncStale).
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
@@ -17,7 +17,7 @@ vi.mock('./plaidItems', () => ({
   deleteItem: vi.fn(),
 }))
 
-const { AUTO_SYNC_STALE_MS, isSyncStale, useAutoSyncOnLogin } = await import('./hooks')
+const { AUTO_SYNC_STALE_MS, isSyncStale, useAutoSyncOnOpen } = await import('./hooks')
 
 const NOW = Date.parse('2026-09-19T12:00:00Z')
 
@@ -28,7 +28,7 @@ function item(over: Partial<PlaidItem>): PlaidItem {
     institution_id: null,
     institution_name: 'Bank',
     institution_logo: null,
-    last_synced_at: new Date(NOW - 5 * 60 * 1000).toISOString(),
+    last_synced_at: new Date(NOW - 60 * 1000).toISOString(),
     is_active: true,
     is_syncing: false,
     sync_started_at: null,
@@ -38,10 +38,10 @@ function item(over: Partial<PlaidItem>): PlaidItem {
 }
 
 describe('isSyncStale', () => {
-  it('is false when every bank synced within the hour', () => {
+  it('is false when every bank synced within the window', () => {
     expect(isSyncStale([item({})], NOW)).toBe(false)
   })
-  it('is true for a bank that never synced, or synced over an hour ago', () => {
+  it('is true for a bank that never synced, or synced before the window', () => {
     expect(isSyncStale([item({ last_synced_at: null })], NOW)).toBe(true)
     const old = new Date(NOW - AUTO_SYNC_STALE_MS - 1000).toISOString()
     expect(isSyncStale([item({ last_synced_at: old })], NOW)).toBe(true)
@@ -54,7 +54,7 @@ describe('isSyncStale', () => {
   })
 })
 
-describe('useAutoSyncOnLogin', () => {
+describe('useAutoSyncOnOpen', () => {
   let qc: QueryClient
   beforeEach(() => {
     vi.useFakeTimers({ now: NOW, toFake: ['Date'] })
@@ -72,7 +72,7 @@ describe('useAutoSyncOnLogin', () => {
 
   it('kicks one sync when a bank is stale, and only once per user', async () => {
     fetchPlaidItems.mockResolvedValue([item({ last_synced_at: null })])
-    const { rerender } = renderHook(({ uid }) => useAutoSyncOnLogin(uid), {
+    const { rerender } = renderHook(({ uid }) => useAutoSyncOnOpen(uid), {
       wrapper,
       initialProps: { uid: 'user-1' },
     })
@@ -83,7 +83,7 @@ describe('useAutoSyncOnLogin', () => {
 
   it('does nothing when every bank is fresh', async () => {
     fetchPlaidItems.mockResolvedValue([item({})])
-    renderHook(() => useAutoSyncOnLogin('user-1'), { wrapper })
+    renderHook(() => useAutoSyncOnOpen('user-1'), { wrapper })
     await waitFor(() => expect(fetchPlaidItems).toHaveBeenCalled())
     await waitFor(() => expect(qc.getQueryData(['sb', 'plaidItems'])).toBeDefined())
     expect(triggerSync).not.toHaveBeenCalled()
@@ -91,8 +91,25 @@ describe('useAutoSyncOnLogin', () => {
 
   it('does nothing while signed out', async () => {
     fetchPlaidItems.mockResolvedValue([item({ last_synced_at: null })])
-    renderHook(() => useAutoSyncOnLogin(null), { wrapper })
+    renderHook(() => useAutoSyncOnOpen(null), { wrapper })
     await waitFor(() => expect(qc.getQueryData(['sb', 'plaidItems'])).toBeDefined())
     expect(triggerSync).not.toHaveBeenCalled()
+  })
+
+  it('re-checks when the tab comes back into view, once per window', async () => {
+    fetchPlaidItems.mockResolvedValue([item({})])
+    renderHook(() => useAutoSyncOnOpen('user-1'), { wrapper })
+    await waitFor(() => expect(qc.getQueryData(['sb', 'plaidItems'])).toBeDefined())
+    expect(triggerSync).not.toHaveBeenCalled()
+
+    fetchPlaidItems.mockResolvedValue([item({ last_synced_at: null })])
+    document.dispatchEvent(new Event('visibilitychange'))
+    await waitFor(() => expect(triggerSync).toHaveBeenCalledTimes(1))
+
+    // A second refocus inside the window does not kick again, even though the
+    // bank still reads stale (e.g. the sync is failing).
+    document.dispatchEvent(new Event('visibilitychange'))
+    await waitFor(() => expect(fetchPlaidItems).toHaveBeenCalledTimes(3))
+    expect(triggerSync).toHaveBeenCalledTimes(1)
   })
 })
